@@ -576,6 +576,11 @@ EGLContext gl_renderer_create_context(struct gl_renderer *renderer) {
     context = eglCreateContext(renderer->egl_display, renderer->forced_egl_config, renderer->root_context, context_attribs);
     pthread_mutex_unlock(&renderer->root_context_lock);
 
+    if (context == EGL_NO_CONTEXT) {
+        LOG_ERROR("Couldn't create a new EGL context.\n");
+        return EGL_NO_CONTEXT;
+    }
+
     return context;
 }
 

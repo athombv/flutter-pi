@@ -1,13 +1,6 @@
 ## 📰 NEWS
+- Added a (not complete) sentry plugin, see: https://github.com/ardera/flutter-pi/wiki/Sentry-Support
 - There's now flutterpi tool to make building the app easier: https://pub.dev/packages/flutterpi_tool
-  - Currently only supported on linux at the moment.
-  - Requires flutter SDK > 3.10.5
-  - Engine binaries no longer need to be installed on the target system.
-  - See updated [Building flutter-pi on the Raspberry Pi](#-building-flutter-pi-on-the-raspberry-pi) and [Building the App](#building-the-app-new-method-linux-only) sections below.
-- Added a section for useful dart packages, See [Useful Dart Packages](#-useful-dart-packages)
-- The new latest flutter gallery commit for flutter 3.10 is `d77920b4ced4a105ad35659fbe3958800d418fb9`
-- The [gstreamer video player](#gstreamer-video-player) now supports creating players from a raw gstreamer pipeline.
-- The deprecated `omxplayer`-based video player has been removed.
 
 # flutter-pi
 A light-weight Flutter Engine Embedder for Raspberry Pi. Inspired by https://github.com/chinmaygarde/flutter_from_scratch.
@@ -42,6 +35,7 @@ If you encounter issues running flutter-pi on any of the supported platforms lis
 2.2 [Building the App](#building-the-app-new-method-linux-only)  
 2.3 [Running your App with flutter-pi](#running-your-app-with-flutter-pi)  
 2.4 [gstreamer video player](#gstreamer-video-player)  
+2.5 [audioplayers](#audioplayers)
 3. **[Performance](#-performance)**  
 3.1 [Graphics Performance](#graphics-performance)  
 3.2 [Touchscreen latency](#touchscreen-latency)
@@ -77,12 +71,12 @@ If you encounter issues running flutter-pi on any of the supported platforms lis
 
 3. Install cmake, graphics, system libraries and fonts:
     ```shell
-    $ sudo apt install cmake libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev libdrm-dev libgbm-dev ttf-mscorefonts-installer fontconfig libsystemd-dev libinput-dev libudev-dev  libxkbcommon-dev
+    sudo apt install cmake libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev libdrm-dev libgbm-dev ttf-mscorefonts-installer fontconfig libsystemd-dev libinput-dev libudev-dev  libxkbcommon-dev
     ```
 
     If you want to use the [gstreamer video player](#gstreamer-video-player), install these too:
     ```shell
-    $ sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-alsa
+    sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-alsa
     ```
     <details>
       <summary>More Info</summary>
@@ -103,7 +97,7 @@ If you encounter issues running flutter-pi on any of the supported platforms lis
 ### Compiling
 1. Clone flutter-pi and cd into the cloned directory:
     ```bash
-    git clone https://github.com/ardera/flutter-pi
+    git clone --recursive https://github.com/ardera/flutter-pi
     cd flutter-pi
     ```
 2. Compile:
@@ -187,11 +181,14 @@ _Example:_
 git clone https://github.com/flutter/gallery.git flutter_gallery
 cd flutter_gallery
 git checkout d77920b4ced4a105ad35659fbe3958800d418fb9
+flutter pub get
 flutterpi_tool build --release --cpu=pi4
 rsync -a ./build/flutter_assets/ pi@raspberrypi:/home/pi/flutter_gallery/
 ```
 
-2. Done. You can now run this app in release mode using `flutter-pi --release /home/pi/flutter_gallery`.
+2. On Raspberry Pi, run `sudo apt-get install xdg-user-dirs` to install the runtime requirement of flutter_gallery. (otherwise it may [throw exception](https://github.com/flutter/gallery/issues/979#issuecomment-1693361972))
+
+3. Done. You can now run this app in release mode using `flutter-pi --release /home/pi/flutter_gallery`.
 
 ### Building the App (old method, linux or windows)
 
@@ -380,6 +377,11 @@ OPTIONS:
                              If no hz value is given, the highest possible refreshrate
                              will be used.
 
+  --dummy-display            Simulate a display. Useful for running apps
+                             without a display attached.
+  --dummy-display-size "width,height" The width & height of the dummy display
+                             in pixels.
+
   -h, --help                 Show this help and exit.
 
 EXAMPLES:
@@ -414,6 +416,18 @@ To use the gstreamer video player, just rebuild flutter-pi (delete your build fo
 
 And then, just use the stuff in the official [video_player](https://pub.dev/packages/video_player) package. (`VideoPlayer`, `VideoPlayerController`, etc, there's nothing specific you need to do on the dart-side)
 
+### audioplayers
+As of current moment flutter-pi implements plugin for `audioplayers: ^5.0.0`.
+There are several things you need to keep in mind:
+- As flutter-pi is intended for use on constrained systems like raspberry pi, you should avoid creating multiple temporary instances and instead prefer to use one global instance of `AudioPlayer`. There is limit you can easily hit if you're going to spam multiple instances of `AudioPlayer`
+- Plugin was tested to work with ALSA and `pulseaudio` might prevent the plugin from playing audio correctly:
+    - Hence please make sure you delete `pulseaudio` package from your system.
+    - Make sure you have `gstreamer1.0-alsa` package installed in addition to packages needed for gstreamer video player.
+    - Make sure you can list audio devices using command: `aplay -L`
+        - If there is error, please investigate why and fix it before using audio
+        - One of the common reasons is outdated ALSA config in which case you should delete existing config and replace it with up to date one
+- Finally, if you want to verify your audio setup is good, you can use `gst-launch` command to invoke `playbin` on audio file directly.
+
 ## 📊 Performance
 ### Graphics Performance
 Graphics performance is actually pretty good. With most of the apps inside the `flutter SDK -> examples -> catalog` directory I get smooth 50-60fps on the Pi 4 2GB and Pi 3 A+.
@@ -433,6 +447,8 @@ This is why I created my own (userspace) touchscreen driver, for improved latenc
 | linux_spidev ([package](https://pub.dev/packages/linux_spidev/)) ([repo](https://github.com/ardera/flutter_packages/tree/main/packages/linux_spidev)) | 🖨 peripherals | Hannes Winkler | SPI bus support for dart/flutter, uses kernel interfaces directly for more performance. |
 | dart_periphery ([package](https://pub.dev/packages/dart_periphery)) ([repo](https://github.com/pezi/dart_periphery)) | 🖨 peripherals | [Peter Sauer](https://github.com/pezi/) | All-in-one package GPIO, I2C, SPI, Serial, PWM, Led, MMIO support using c-periphery. |
 | flutterpi_gstreamer_video_player ([package](https://pub.dev/packages/flutterpi_gstreamer_video_player)) ([repo](https://github.com/ardera/flutter_packages/tree/main/packages/flutterpi_gstreamer_video_player)) | ⏯️ multimedia | Hannes Winkler | Official video player implementation for flutter-pi. See [GStreamer video player](#gstreamer-video-player) section above. |
+| charset_converter ([package](https://pub.dev/packages/charset_converter)) ([repo](https://github.com/pr0gramista/charset_converter)) | 🗚 encoding | Bartosz Wiśniewski | Encode and decode charsets using platform built-in converter. |
+| sentry_flutter ([package](https://pub.dev/packages/sentry_flutter)) ([repo](https://github.com/getsentry/sentry-dart))|  📊 Monitoring | sentry.io | See https://github.com/ardera/flutter-pi/wiki/Sentry-Support for instructions. |
 
 ## 💬 Discord
 There a `#custom-embedders` channel on the [flutter discord](https://github.com/flutter/flutter/wiki/Chat) which you can use if you have any questions regarding flutter-pi or generally, anything related to embedding the engine for which you don't want to open issue about or write an email.

@@ -137,6 +137,11 @@ OPTIONS:\n\
                              If no hz value is given, the highest possible refreshrate\n\
                              will be used.\n\
 \n\
+  --dummy-display            Simulate a display. Useful for running apps\n\
+                             without a display attached.\n\
+  --dummy-display-size \"width,height\" The width & height of the dummy display\n\
+                             in pixels.\n\
+\n\
   -h, --help                 Show this help and exit.\n\
 \n\
 EXAMPLES:\n\
@@ -803,16 +808,16 @@ static int on_send_platform_message(void *userdata) {
         result = flutterpi->flutter.procs
                      .SendPlatformMessageResponse(flutterpi->flutter.engine, msg->target_handle, msg->message, msg->message_size);
     } else {
-        result = flutterpi->flutter.procs.SendPlatformMessage(
-            flutterpi->flutter.engine,
-            &(FlutterPlatformMessage){
-                .struct_size = sizeof(FlutterPlatformMessage),
-                .channel = msg->target_channel,
-                .message = msg->message,
-                .message_size = msg->message_size,
-                .response_handle = msg->response_handle,
-            }
-        );
+        FlutterPlatformMessage message;
+        memset(&message, 0, sizeof(message));
+
+        message.struct_size = sizeof(FlutterPlatformMessage);
+        message.channel = msg->target_channel;
+        message.message_size = msg->message_size;
+        message.response_handle = msg->response_handle;
+        message.message = msg->message;
+
+        result = flutterpi->flutter.procs.SendPlatformMessage(flutterpi->flutter.engine, &message);
     }
 
     if (msg->message) {
@@ -1256,115 +1261,107 @@ static FlutterEngine create_flutter_engine(
     FlutterEngineAOTData aot_data,
     const FlutterEngineProcTable *procs
 ) {
-    FlutterRendererConfig renderer_config;
     FlutterEngineResult engine_result;
-    FlutterProjectArgs project_args;
     FlutterEngine engine;
+
+    FlutterRendererConfig renderer_config;
+    memset(&renderer_config, 0, sizeof(renderer_config));
 
     // configure flutter rendering
     if (vk_renderer) {
-        COMPILE_ASSERT(sizeof(FlutterRendererConfig) == 60 || sizeof(FlutterRendererConfig) == 120);
-        COMPILE_ASSERT(sizeof(FlutterVulkanRendererConfig) == 56 || sizeof(FlutterVulkanRendererConfig) == 112);
 #ifdef HAVE_VULKAN
-        renderer_config = (FlutterRendererConfig) {
-            .type = kVulkan,
-            .vulkan = {
-                .struct_size = sizeof(FlutterVulkanRendererConfig),
-                .version = vk_renderer_get_vk_version(vk_renderer),
-                .instance = vk_renderer_get_instance(vk_renderer),
-                .physical_device = vk_renderer_get_physical_device(vk_renderer),
-                .device = vk_renderer_get_device(vk_renderer),
-                .queue_family_index = vk_renderer_get_queue_family_index(vk_renderer),
-                .queue = vk_renderer_get_queue(vk_renderer),
-                .enabled_instance_extension_count = vk_renderer_get_enabled_instance_extension_count(vk_renderer),
-                .enabled_instance_extensions = vk_renderer_get_enabled_instance_extensions(vk_renderer),
-                .enabled_device_extension_count = vk_renderer_get_enabled_device_extension_count(vk_renderer),
-                .enabled_device_extensions = vk_renderer_get_enabled_device_extensions(vk_renderer),
-                .get_instance_proc_address_callback = on_get_vulkan_proc_address,
-                .get_next_image_callback = on_get_next_vulkan_image,
-                .present_image_callback = on_present_vulkan_image,
-            },
-        };
+        renderer_config.type = kVulkan;
+        renderer_config.vulkan.struct_size = sizeof(FlutterVulkanRendererConfig);
+        renderer_config.vulkan.version = vk_renderer_get_vk_version(vk_renderer);
+        renderer_config.vulkan.instance = vk_renderer_get_instance(vk_renderer);
+        renderer_config.vulkan.physical_device = vk_renderer_get_physical_device(vk_renderer);
+        renderer_config.vulkan.device = vk_renderer_get_device(vk_renderer);
+        renderer_config.vulkan.queue_family_index = vk_renderer_get_queue_family_index(vk_renderer);
+        renderer_config.vulkan.queue = vk_renderer_get_queue(vk_renderer);
+        renderer_config.vulkan.enabled_instance_extension_count = vk_renderer_get_enabled_instance_extension_count(vk_renderer);
+        renderer_config.vulkan.enabled_instance_extensions = vk_renderer_get_enabled_instance_extensions(vk_renderer);
+        renderer_config.vulkan.enabled_device_extension_count = vk_renderer_get_enabled_device_extension_count(vk_renderer);
+        renderer_config.vulkan.enabled_device_extensions = vk_renderer_get_enabled_device_extensions(vk_renderer);
+        renderer_config.vulkan.get_instance_proc_address_callback = on_get_vulkan_proc_address;
+        renderer_config.vulkan.get_next_image_callback = on_get_next_vulkan_image;
+        renderer_config.vulkan.present_image_callback = on_present_vulkan_image;
 #else
         UNREACHABLE();
 #endif
     } else {
-        COMPILE_ASSERT(sizeof(FlutterRendererConfig) == 60 || sizeof(FlutterRendererConfig) == 120);
-        COMPILE_ASSERT(sizeof(FlutterOpenGLRendererConfig) == 52 || sizeof(FlutterOpenGLRendererConfig) == 104);
 #ifdef HAVE_EGL_GLES2
-        renderer_config = (FlutterRendererConfig){
-            .type = kOpenGL,
-            .open_gl = {
-                .struct_size = sizeof(FlutterOpenGLRendererConfig),
-                .make_current = on_make_current,
-                .clear_current = on_clear_current,
-                .present = on_present,
-                .fbo_callback = fbo_callback,
-                .make_resource_current = on_make_resource_current,
-                .gl_proc_resolver = proc_resolver,
-                .surface_transformation = on_get_transformation,
-                .gl_external_texture_frame_callback = on_gl_external_texture_frame_callback,
-                .fbo_with_frame_info_callback = NULL,
-                .present_with_info = NULL,
-                .populate_existing_damage = NULL,
-            },
-        };
+        renderer_config.type = kOpenGL;
+        renderer_config.open_gl.struct_size = sizeof(FlutterOpenGLRendererConfig);
+        renderer_config.open_gl.make_current = on_make_current;
+        renderer_config.open_gl.clear_current = on_clear_current;
+        renderer_config.open_gl.present = on_present;
+        renderer_config.open_gl.fbo_callback = fbo_callback;
+        renderer_config.open_gl.make_resource_current = on_make_resource_current;
+        renderer_config.open_gl.gl_proc_resolver = proc_resolver;
+        renderer_config.open_gl.surface_transformation = on_get_transformation;
+        renderer_config.open_gl.gl_external_texture_frame_callback = on_gl_external_texture_frame_callback;
+        renderer_config.open_gl.fbo_with_frame_info_callback = NULL;
+        renderer_config.open_gl.present_with_info = NULL;
+        renderer_config.open_gl.populate_existing_damage = NULL;
 #else
         UNREACHABLE();
 #endif
     }
 
-    COMPILE_ASSERT(sizeof(FlutterProjectArgs) == 152 || sizeof(FlutterProjectArgs) == 288);
+    FlutterTaskRunnerDescription platform_task_runner;
+    memset(&platform_task_runner, 0, sizeof(platform_task_runner));
+
+    platform_task_runner.struct_size = sizeof(FlutterTaskRunnerDescription);
+    platform_task_runner.user_data = flutterpi;
+    platform_task_runner.runs_task_on_current_thread_callback = runs_platform_tasks_on_current_thread;
+    platform_task_runner.post_task_callback = on_post_flutter_task;
+
+    FlutterCustomTaskRunners custom_task_runners;
+    memset(&custom_task_runners, 0, sizeof(custom_task_runners));
+
+    custom_task_runners.struct_size = sizeof(FlutterCustomTaskRunners);
+    custom_task_runners.platform_task_runner = &platform_task_runner;
+    custom_task_runners.render_task_runner = NULL;
+    custom_task_runners.thread_priority_setter = NULL;
 
     // configure the project
-    project_args = (FlutterProjectArgs){
-        .struct_size = sizeof(FlutterProjectArgs),
-        .assets_path = paths->asset_bundle_path,
-        .icu_data_path = paths->icudtl_path,
-        .command_line_argc = engine_argc,
-        .command_line_argv = (const char *const *) engine_argv,
-        .platform_message_callback = on_platform_message,
-        .vm_snapshot_data = NULL,
-        .vm_snapshot_data_size = 0,
-        .vm_snapshot_instructions = NULL,
-        .vm_snapshot_instructions_size = 0,
-        .isolate_snapshot_data = NULL,
-        .isolate_snapshot_data_size = 0,
-        .isolate_snapshot_instructions = NULL,
-        .isolate_snapshot_instructions_size = 0,
-        .root_isolate_create_callback = NULL,
-        .update_semantics_node_callback = NULL,
-        .update_semantics_custom_action_callback = NULL,
-        .persistent_cache_path = paths->asset_bundle_path,
-        .is_persistent_cache_read_only = false,
-        .vsync_callback = NULL,  // on_frame_request, /* broken since 2.2, kinda */
-        .custom_dart_entrypoint = NULL,
-        .custom_task_runners =
-            &(FlutterCustomTaskRunners){
-                .struct_size = sizeof(FlutterCustomTaskRunners),
-                .platform_task_runner =
-                    &(FlutterTaskRunnerDescription){
-                        .struct_size = sizeof(FlutterTaskRunnerDescription),
-                        .user_data = flutterpi,
-                        .runs_task_on_current_thread_callback = runs_platform_tasks_on_current_thread,
-                        .post_task_callback = on_post_flutter_task,
-                    },
-                .render_task_runner = NULL,
-                .thread_priority_setter = NULL,
-            },
-        .shutdown_dart_vm_when_done = true,
-        .compositor = compositor_get_flutter_compositor(compositor),
-        .dart_old_gen_heap_size = -1,
-        .aot_data = aot_data,
-        .compute_platform_resolved_locale_callback = on_compute_platform_resolved_locales,
-        .dart_entrypoint_argc = 0,
-        .dart_entrypoint_argv = NULL,
-        .log_message_callback = NULL,
-        .log_tag = NULL,
-        .on_pre_engine_restart_callback = NULL,
-        .update_semantics_callback = NULL,
-        .update_semantics_callback2 = NULL,
-    };
+    FlutterProjectArgs project_args;
+    memset(&project_args, 0, sizeof(project_args));
+
+    project_args.struct_size = sizeof(FlutterProjectArgs);
+    project_args.assets_path = paths->asset_bundle_path;
+    project_args.icu_data_path = paths->icudtl_path;
+    project_args.command_line_argc = engine_argc;
+    project_args.command_line_argv = (const char *const *) engine_argv;
+    project_args.platform_message_callback = on_platform_message;
+    project_args.vm_snapshot_data = NULL;
+    project_args.vm_snapshot_data_size = 0;
+    project_args.vm_snapshot_instructions = NULL;
+    project_args.vm_snapshot_instructions_size = 0;
+    project_args.isolate_snapshot_data = NULL;
+    project_args.isolate_snapshot_data_size = 0;
+    project_args.isolate_snapshot_instructions = NULL;
+    project_args.isolate_snapshot_instructions_size = 0;
+    project_args.root_isolate_create_callback = NULL;
+    project_args.update_semantics_node_callback = NULL;
+    project_args.update_semantics_custom_action_callback = NULL;
+    project_args.persistent_cache_path = paths->asset_bundle_path;
+    project_args.is_persistent_cache_read_only = false;
+    project_args.vsync_callback = NULL;  // on_frame_request, /* broken since 2.2, kinda *
+    project_args.custom_dart_entrypoint = NULL;
+    project_args.custom_task_runners = &custom_task_runners;
+    project_args.shutdown_dart_vm_when_done = true;
+    project_args.compositor = compositor_get_flutter_compositor(compositor);
+    project_args.dart_old_gen_heap_size = -1;
+    project_args.aot_data = aot_data;
+    project_args.compute_platform_resolved_locale_callback = on_compute_platform_resolved_locales;
+    project_args.dart_entrypoint_argc = 0;
+    project_args.dart_entrypoint_argv = NULL;
+    project_args.log_message_callback = NULL;
+    project_args.log_tag = NULL;
+    project_args.on_pre_engine_restart_callback = NULL;
+    project_args.update_semantics_callback = NULL;
+    project_args.update_semantics_callback2 = NULL;
 
     // spin up the engine
     engine_result = procs->Initialize(FLUTTER_ENGINE_VERSION, &renderer_config, &project_args, flutterpi, &engine);
@@ -1429,19 +1426,15 @@ static int flutterpi_run(struct flutterpi *flutterpi) {
         goto fail_shutdown_engine;
     }
 
-    COMPILE_ASSERT(sizeof(FlutterEngineDisplay) == 32);
+    FlutterEngineDisplay display;
+    memset(&display, 0, sizeof(display));
 
-    engine_result = procs->NotifyDisplayUpdate(
-        engine,
-        kFlutterEngineDisplaysUpdateTypeStartup,
-        &(FlutterEngineDisplay){
-            .struct_size = sizeof(FlutterEngineDisplay),
-            .display_id = 0,
-            .single_display = true,
-            .refresh_rate = compositor_get_refresh_rate(flutterpi->compositor),
-        },
-        1
-    );
+    display.struct_size = sizeof(FlutterEngineDisplay);
+    display.display_id = 0;
+    display.single_display = true;
+    display.refresh_rate = compositor_get_refresh_rate(flutterpi->compositor);
+
+    engine_result = procs->NotifyDisplayUpdate(engine, kFlutterEngineDisplaysUpdateTypeStartup, &display, 1);
     if (engine_result != kSuccess) {
         ok = EINVAL;
         LOG_ERROR(
@@ -1454,24 +1447,22 @@ static int flutterpi_run(struct flutterpi *flutterpi) {
     compositor_get_view_geometry(flutterpi->compositor, &geometry);
 
     // just so we get an error if the window metrics event was expanded without us noticing
-    COMPILE_ASSERT(sizeof(FlutterWindowMetricsEvent) == 64 || sizeof(FlutterWindowMetricsEvent) == 80);
+    FlutterWindowMetricsEvent window_metrics_event;
+    memset(&window_metrics_event, 0, sizeof(window_metrics_event));
+
+    window_metrics_event.struct_size = sizeof(FlutterWindowMetricsEvent);
+    window_metrics_event.width = geometry.view_size.x;
+    window_metrics_event.height = geometry.view_size.y;
+    window_metrics_event.pixel_ratio = geometry.device_pixel_ratio;
+    window_metrics_event.left = 0;
+    window_metrics_event.top = 0;
+    window_metrics_event.physical_view_inset_top = 0;
+    window_metrics_event.physical_view_inset_right = 0;
+    window_metrics_event.physical_view_inset_bottom = 0;
+    window_metrics_event.physical_view_inset_left = 0;
 
     // update window size
-    engine_result = procs->SendWindowMetricsEvent(
-        engine,
-        &(FlutterWindowMetricsEvent){
-            .struct_size = sizeof(FlutterWindowMetricsEvent),
-            .width = geometry.view_size.x,
-            .height = geometry.view_size.y,
-            .pixel_ratio = geometry.device_pixel_ratio,
-            .left = 0,
-            .top = 0,
-            .physical_view_inset_top = 0,
-            .physical_view_inset_right = 0,
-            .physical_view_inset_bottom = 0,
-            .physical_view_inset_left = 0,
-        }
-    );
+    engine_result = procs->SendWindowMetricsEvent(engine, &window_metrics_event);
     if (engine_result != kSuccess) {
         LOG_ERROR(
             "Could not send window metrics to flutter engine. FlutterEngineSendWindowMetricsEvent: %s\n",
@@ -1840,32 +1831,6 @@ static int on_user_input_fd_ready(sd_event_source *s, int fd, uint32_t revents, 
     return user_input_on_fd_ready(input);
 }
 
-struct cmd_args {
-    bool has_orientation;
-    enum device_orientation orientation;
-
-    bool has_rotation;
-    int rotation;
-
-    bool has_physical_dimensions;
-    int width_mm, height_mm;
-
-    bool has_pixel_format;
-    enum pixfmt pixel_format;
-
-    bool has_runtime_mode;
-    enum flutter_runtime_mode runtime_mode;
-
-    char *bundle_path;
-
-    int engine_argc;
-    char **engine_argv;
-
-    bool use_vulkan;
-
-    char *desired_videomode;
-};
-
 static struct flutter_paths *setup_paths(enum flutter_runtime_mode runtime_mode, const char *app_bundle_path) {
 #if defined(FILESYSTEM_LAYOUT_DEFAULT)
     return fs_layout_flutterpi_resolve(app_bundle_path, runtime_mode);
@@ -1877,12 +1842,27 @@ static struct flutter_paths *setup_paths(enum flutter_runtime_mode runtime_mode,
 #endif
 }
 
-static bool parse_cmd_args(int argc, char **argv, struct cmd_args *result_out) {
+static bool parse_vec2i(const char *str, struct vec2i *out) {
+    int ok;
+
+    ok = sscanf(str, "%d,%d", &out->x, &out->y);
+    if (ok != 2) {
+        return false;
+    }
+
+    return true;
+}
+
+bool flutterpi_parse_cmdline_args(int argc, char **argv, struct flutterpi_cmdline_args *result_out) {
     bool finished_parsing_options;
     int runtime_mode_int = FLUTTER_RUNTIME_MODE_DEBUG;
     int vulkan_int = false;
+    int dummy_display_int = 0;
     int longopt_index = 0;
     int opt, ok;
+
+    // start parsing from the first argument, in case this is called multiple times.
+    optind = 1;
 
     struct option long_options[] = {
         { "release", no_argument, &runtime_mode_int, FLUTTER_RUNTIME_MODE_RELEASE },
@@ -1894,6 +1874,8 @@ static bool parse_cmd_args(int argc, char **argv, struct cmd_args *result_out) {
         { "pixelformat", required_argument, NULL, 'p' },
         { "vulkan", no_argument, &vulkan_int, true },
         { "videomode", required_argument, NULL, 'v' },
+        { "dummy-display", no_argument, &dummy_display_int, 1 },
+        { "dummy-display-size", required_argument, NULL, 's' },
         { 0, 0, 0, 0 },
     };
 
@@ -1960,16 +1942,18 @@ static bool parse_cmd_args(int argc, char **argv, struct cmd_args *result_out) {
                 break;
 
             case 'd':;
-                unsigned int width_mm, height_mm;
-
-                ok = sscanf(optarg, "%u,%u", &width_mm, &height_mm);
-                if (ok != 2) {
-                    LOG_ERROR("ERROR: Invalid argument for --dimensions passed.\n%s", usage);
+                ok = parse_vec2i(optarg, &result_out->physical_dimensions);
+                if (!ok) {
+                    LOG_ERROR("ERROR: Invalid argument for --dimensions passed.\n");
                     return false;
                 }
 
-                result_out->width_mm = width_mm;
-                result_out->height_mm = height_mm;
+                if (result_out->physical_dimensions.x < 0 || result_out->physical_dimensions.y < 0) {
+                    LOG_ERROR("ERROR: Invalid argument for --dimensions passed.\n");
+                    result_out->physical_dimensions = VEC2I(0, 0);
+                    return false;
+                }
+
                 result_out->has_physical_dimensions = true;
 
                 break;
@@ -2004,6 +1988,15 @@ valid_format:
                 result_out->desired_videomode = vmode_dup;
                 break;
 
+            case 's':;  // --dummy-display-size
+                ok = parse_vec2i(optarg, &result_out->dummy_display_size);
+                if (!ok) {
+                    LOG_ERROR("ERROR: Invalid argument for --dummy-display-size passed.\n");
+                    return false;
+                }
+
+                break;
+
             case 'h': printf("%s", usage); return false;
 
             case '?':
@@ -2021,7 +2014,7 @@ valid_format:
         return false;
     }
 
-    result_out->bundle_path = realpath(argv[optind], NULL);
+    result_out->bundle_path = strdup(argv[optind]);
     result_out->runtime_mode = runtime_mode_int;
     result_out->has_runtime_mode = runtime_mode_int != 0;
 
@@ -2029,14 +2022,9 @@ valid_format:
     result_out->engine_argc = argc - optind;
     result_out->engine_argv = argv + optind;
 
-#ifndef HAVE_VULKAN
-    if (vulkan_int == true) {
-        LOG_ERROR("ERROR: --vulkan was specified, but flutter-pi was built without vulkan support.\n");
-        printf("%s", usage);
-        return false;
-    }
-#endif
     result_out->use_vulkan = vulkan_int;
+
+    result_out->dummy_display = !!dummy_display_int;
 
     return true;
 }
@@ -2178,6 +2166,60 @@ fail_free_devices:
     return NULL;
 }
 
+static struct gbm_device *open_rendernode_as_gbm_device() {
+    struct gbm_device *gbm;
+    drmDevicePtr devices[64];
+    int ok, n_devices;
+
+    ok = drmGetDevices2(0, devices, sizeof(devices) / sizeof(*devices));
+    if (ok < 0) {
+        LOG_ERROR("Could not query DRM device list: %s\n", strerror(-ok));
+        return NULL;
+    }
+
+    n_devices = ok;
+
+    // find a GPU that has a primary node
+    gbm = NULL;
+    for (int i = 0; i < n_devices; i++) {
+        drmDevicePtr device;
+
+        device = devices[i];
+
+        if (!(device->available_nodes & (1 << DRM_NODE_RENDER))) {
+            // We need a primary node.
+            continue;
+        }
+
+        int fd = open(device->nodes[DRM_NODE_RENDER], O_RDWR | O_CLOEXEC);
+        if (fd < 0) {
+            LOG_ERROR("Could not open render node \"%s\". open: %s. Continuing.\n", device->nodes[DRM_NODE_RENDER], strerror(errno));
+            continue;
+        }
+
+        gbm = gbm_create_device(fd);
+        if (gbm == NULL) {
+            LOG_ERROR("Could not create gbm device from render node \"%s\". Continuing.\n", device->nodes[DRM_NODE_RENDER]);
+            close(fd);
+            continue;
+        }
+
+        break;
+    }
+
+    drmFreeDevices(devices, n_devices);
+
+    if (gbm == NULL) {
+        LOG_ERROR(
+            "flutter-pi couldn't find a usable render device.\n"
+            "Please make sure you have a GPU connected.\n"
+        );
+        return NULL;
+    }
+
+    return gbm;
+}
+
 #ifdef HAVE_LIBSEAT
 static void on_session_enable(struct libseat *seat, void *userdata) {
     struct flutterpi *fpi;
@@ -2270,7 +2312,7 @@ struct flutterpi *flutterpi_new_from_args(int argc, char **argv) {
     struct compositor *compositor;
     struct flutterpi *fpi;
     struct sd_event *event_loop;
-    struct cmd_args cmd_args;
+    struct flutterpi_cmdline_args cmd_args;
     struct libseat *libseat;
     struct locales *locales;
     struct drmdev *drmdev;
@@ -2288,10 +2330,18 @@ struct flutterpi *flutterpi_new_from_args(int argc, char **argv) {
     /// TODO: Remove this
     flutterpi = fpi;
 
-    ok = parse_cmd_args(argc, argv, &cmd_args);
+    ok = flutterpi_parse_cmdline_args(argc, argv, &cmd_args);
     if (ok == false) {
         goto fail_free_fpi;
     }
+
+#ifndef HAVE_VULKAN
+    if (cmd_args.use_vulkan == true) {
+        LOG_ERROR("ERROR: --vulkan was specified, but flutter-pi was built without vulkan support.\n");
+        printf("%s", usage);
+        return NULL;
+    }
+#endif
 
     runtime_mode = cmd_args.has_runtime_mode ? cmd_args.runtime_mode : FLUTTER_RUNTIME_MODE_DEBUG;
     bundle_path = cmd_args.bundle_path;
@@ -2310,6 +2360,11 @@ struct flutterpi *flutterpi_new_from_args(int argc, char **argv) {
 #endif
 
     desired_videomode = cmd_args.desired_videomode;
+
+    if (bundle_path == NULL) {
+        LOG_ERROR("ERROR: Bundle path does not exist.\n");
+        goto fail_free_cmd_args;
+    }
 
     paths = setup_paths(runtime_mode, bundle_path);
     if (paths == NULL) {
@@ -2381,15 +2436,28 @@ struct flutterpi *flutterpi_new_from_args(int argc, char **argv) {
 
     locales_print(locales);
 
-    drmdev = find_drmdev(libseat);
-    if (drmdev == NULL) {
-        goto fail_destroy_locales;
-    }
+    if (cmd_args.dummy_display) {
+        drmdev = NULL;
 
-    gbm_device = drmdev_get_gbm_device(drmdev);
-    if (gbm_device == NULL) {
-        LOG_ERROR("Couldn't create GBM device.\n");
-        goto fail_destroy_drmdev;
+        // for off-screen rendering, we just open the unprivileged /dev/dri/renderD128 (or whatever)
+        // render node as a GBM device.
+        // There's other ways to get an offscreen EGL display, but we need the gbm_device for other things
+        // (e.g. buffer allocating for the video player, so we just do this.)
+        gbm_device = open_rendernode_as_gbm_device();
+        if (gbm_device == NULL) {
+            goto fail_destroy_locales;
+        }
+    } else {
+        drmdev = find_drmdev(libseat);
+        if (drmdev == NULL) {
+            goto fail_destroy_locales;
+        }
+
+        gbm_device = drmdev_get_gbm_device(drmdev);
+        if (gbm_device == NULL) {
+            LOG_ERROR("Couldn't create GBM device.\n");
+            goto fail_destroy_drmdev;
+        }
     }
 
     tracer = tracer_new_with_stubs();
@@ -2438,8 +2506,6 @@ struct flutterpi *flutterpi_new_from_args(int argc, char **argv) {
                 "         This warning will probably result in a \"failed to set mode\" error\n"
                 "         later on in the initialization.\n"
             );
-            ok = EINVAL;
-            goto fail_unref_scheduler;
         }
 #else
         UNREACHABLE();
@@ -2449,29 +2515,44 @@ struct flutterpi *flutterpi_new_from_args(int argc, char **argv) {
         goto fail_unref_scheduler;
     }
 
-    window = kms_window_new(
-        // clang-format off
-        tracer,
-        scheduler,
-        renderer_type,
-        gl_renderer,
-        vk_renderer,
-        cmd_args.has_rotation,
-        cmd_args.rotation == 0   ? PLANE_TRANSFORM_ROTATE_0   :
-            cmd_args.rotation == 90  ? PLANE_TRANSFORM_ROTATE_90  :
-            cmd_args.rotation == 180 ? PLANE_TRANSFORM_ROTATE_180 :
-            cmd_args.rotation == 270 ? PLANE_TRANSFORM_ROTATE_270 :
-            (assert(0 && "invalid rotation"), PLANE_TRANSFORM_ROTATE_0),
-        cmd_args.has_orientation, cmd_args.orientation,
-        cmd_args.has_physical_dimensions, cmd_args.width_mm, cmd_args.height_mm,
-        cmd_args.has_pixel_format, cmd_args.pixel_format,
-        drmdev,
-        desired_videomode
-        // clang-format on
-    );
-    if (window == NULL) {
-        LOG_ERROR("Couldn't create KMS window.\n");
-        goto fail_unref_renderer;
+    if (cmd_args.dummy_display) {
+        window = dummy_window_new(
+            tracer,
+            scheduler,
+            renderer_type,
+            gl_renderer,
+            vk_renderer,
+            cmd_args.dummy_display_size,
+            cmd_args.has_physical_dimensions,
+            cmd_args.physical_dimensions.x,
+            cmd_args.physical_dimensions.y,
+            60.0
+        );
+    } else {
+        window = kms_window_new(
+            // clang-format off
+            tracer,
+            scheduler,
+            renderer_type,
+            gl_renderer,
+            vk_renderer,
+            cmd_args.has_rotation,
+            cmd_args.rotation == 0   ? PLANE_TRANSFORM_ROTATE_0   :
+                cmd_args.rotation == 90  ? PLANE_TRANSFORM_ROTATE_90  :
+                cmd_args.rotation == 180 ? PLANE_TRANSFORM_ROTATE_180 :
+                cmd_args.rotation == 270 ? PLANE_TRANSFORM_ROTATE_270 :
+                (assert(0 && "invalid rotation"), PLANE_TRANSFORM_ROTATE_0),
+            cmd_args.has_orientation, cmd_args.orientation,
+            cmd_args.has_physical_dimensions, cmd_args.physical_dimensions.x, cmd_args.physical_dimensions.y,
+            cmd_args.has_pixel_format, cmd_args.pixel_format,
+            drmdev,
+            desired_videomode
+            // clang-format on
+        );
+        if (window == NULL) {
+            LOG_ERROR("Couldn't create KMS window.\n");
+            goto fail_unref_renderer;
+        }
     }
 
     compositor = compositor_new(tracer, window);
@@ -2481,10 +2562,12 @@ struct flutterpi *flutterpi_new_from_args(int argc, char **argv) {
     }
 
     /// TODO: Do we really need the window after this?
-    ok = sd_event_add_io(event_loop, NULL, drmdev_get_event_fd(drmdev), EPOLLIN | EPOLLHUP | EPOLLPRI, on_drmdev_ready, drmdev);
-    if (ok < 0) {
-        LOG_ERROR("Could not add DRM pageflip event listener. sd_event_add_io: %s\n", strerror(-ok));
-        goto fail_unref_compositor;
+    if (drmdev != NULL) {
+        ok = sd_event_add_io(event_loop, NULL, drmdev_get_event_fd(drmdev), EPOLLIN | EPOLLHUP | EPOLLPRI, on_drmdev_ready, drmdev);
+        if (ok < 0) {
+            LOG_ERROR("Could not add DRM pageflip event listener. sd_event_add_io: %s\n", strerror(-ok));
+            goto fail_unref_compositor;
+        }
     }
 
     compositor_get_view_geometry(compositor, &geometry);
@@ -2624,7 +2707,7 @@ struct flutterpi *flutterpi_new_from_args(int argc, char **argv) {
     fpi->vk_renderer = vk_renderer;
     fpi->user_input = input;
     fpi->flutter.runtime_mode = runtime_mode;
-    fpi->flutter.bundle_path = bundle_path;
+    fpi->flutter.bundle_path = realpath(bundle_path, NULL);
     fpi->flutter.engine_argc = engine_argc;
     fpi->flutter.engine_argv = engine_argv;
     fpi->flutter.paths = paths;
