@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +18,7 @@
 #include <xf86drmMode.h>
 
 #include "pixel_format.h"
+#include "util/asserts.h"
 #include "util/bitset.h"
 #include "util/list.h"
 #include "util/lock_ops.h"
@@ -70,7 +72,7 @@ struct kms_req_builder {
     struct drm_connector *connector;
     struct drm_crtc *crtc;
 
-    BITSET_DECLARE(available_planes, 32);
+    BITSET_DECLARE(available_planes, 128);
     drmModeAtomicReq *req;
     int64_t next_zpos;
 
@@ -82,7 +84,7 @@ struct kms_req_builder {
     drmModeModeInfo mode;
 };
 
-COMPILE_ASSERT(BITSET_SIZE(((struct kms_req_builder *) 0)->available_planes) == 32);
+COMPILE_ASSERT(BITSET_SIZE(((struct kms_req_builder *) 0)->available_planes) == 128);
 
 struct drmdev {
     int fd;
@@ -757,11 +759,16 @@ static int fetch_plane(int drm_fd, uint32_t plane_id, struct drm_plane *plane_ou
         } else if (streq(info->name, "alpha")) {
             has_alpha = true;
             assert(info->flags == DRM_MODE_PROP_RANGE);
-            assert(info->values[0] == 0);
-            assert(info->values[1] == 0xFFFF);
-            assert(props->prop_values[j] <= 0xFFFF);
+            assert(info->values[0] <= 0xFFFF);
+            assert(info->values[1] <= 0xFFFF);
+            assert(info->values[0] <= info->values[1]);
+            plane_out->min_alpha = (uint16_t) info->values[0];
+            plane_out->max_alpha = (uint16_t) info->values[1];
 
-            committed_alpha = (uint16_t) props->prop_values[j];
+            uint64_t value = props->prop_values[j];
+            assert(plane_out->min_alpha <= value);
+            assert(value <= plane_out->max_alpha);
+            committed_alpha = (uint16_t) value;
         } else if (streq(info->name, "pixel blend mode")) {
             has_blend_mode = true;
             assert(info->flags == DRM_MODE_PROP_ENUM);
@@ -2395,7 +2402,8 @@ int kms_req_builder_push_fb_layer(
     const struct kms_fb_layer *layer,
     kms_fb_release_cb_t release_callback,
     kms_deferred_fb_release_cb_t deferred_release_callback,
-    void *userdata
+    void *userdata,
+    bool *allocated_cursor_plane
 ) {
     struct drm_plane *plane;
     int64_t zpos;
@@ -2443,8 +2451,29 @@ int kms_req_builder_push_fb_layer(
             /* id_range */ false, 0
             // clang-format on
         );
+
+        // If allocation failed due to rotation and rotation is not enforced, retry without rotation
+        if (plane == NULL && layer->has_rotation && !layer->enforce_rotation) {
+            plane = allocate_plane(
+                // clang-format off
+                builder,
+                /* allow_primary */ false,
+                /* allow_overlay */ false,
+                /* allow_cursor  */ true,
+                /* format */ layer->format,
+                /* modifier */ layer->has_modifier, layer->modifier,
+                /* zpos */ false, 0, 0,
+                /* rotation */ false, PLANE_TRANSFORM_NONE,
+                /* id_range */ false, 0
+                // clang-format on
+            );
+        }
+
         if (plane == NULL) {
+            if (allocated_cursor_plane) *allocated_cursor_plane = false;
             LOG_DEBUG("Couldn't find a fitting cursor plane.\n");
+        } else  {
+            if (allocated_cursor_plane) *allocated_cursor_plane = true;
         }
     }
 
@@ -2484,6 +2513,39 @@ int kms_req_builder_push_fb_layer(
                 // clang-format on
             );
         }
+
+        // If allocation failed due to rotation and rotation is not enforced, retry without rotation
+        if (plane == NULL && layer->has_rotation && !layer->enforce_rotation) {
+            plane = allocate_plane(
+                // clang-format off
+                builder,
+                /* allow_primary */ true,
+                /* allow_overlay */ false,
+                /* allow_cursor */ false,
+                /* format */ layer->format,
+                /* modifier */ layer->has_modifier, layer->modifier,
+                /* zpos */ false, 0, 0,
+                /* rotation */ false, PLANE_TRANSFORM_NONE,
+                /* id_range */ false, 0
+                // clang-format on
+            );
+
+            if (plane == NULL && !get_pixfmt_info(layer->format)->is_opaque) {
+                plane = allocate_plane(
+                    // clang-format off
+                    builder,
+                    /* allow_primary */ true,
+                    /* allow_overlay */ false,
+                    /* allow_cursor */ false,
+                    /* format */ pixfmt_opaque(layer->format),
+                    /* modifier */ layer->has_modifier, layer->modifier,
+                    /* zpos */ false, 0, 0,
+                    /* rotation */ false, PLANE_TRANSFORM_NONE,
+                    /* id_range */ false, 0
+                    // clang-format on
+                );
+            }
+        }
     } else if (plane == NULL) {
         // First try to find an overlay plane with a higher zpos.
         plane = allocate_plane(
@@ -2519,10 +2581,43 @@ int kms_req_builder_push_fb_layer(
                 // clang-format on
             );
         }
+
+        // If allocation failed due to rotation and rotation is not enforced, retry without rotation
+        if (plane == NULL && layer->has_rotation && !layer->enforce_rotation) {
+            plane = allocate_plane(
+                // clang-format off
+                builder,
+                /* allow_primary */ false,
+                /* allow_overlay */ true,
+                /* allow_cursor */ false,
+                /* format */ layer->format,
+                /* modifier */ layer->has_modifier, layer->modifier,
+                /* zpos */ true, builder->next_zpos, INT64_MAX,
+                /* rotation */ false, PLANE_TRANSFORM_NONE,
+                /* id_range */ false, 0
+                // clang-format on
+            );
+
+            if (plane == NULL) {
+                plane = allocate_plane(
+                    // clang-format off
+                    builder,
+                    /* allow_primary */ false,
+                    /* allow_overlay */ true,
+                    /* allow_cursor */ false,
+                    /* format */ layer->format,
+                    /* modifier */ layer->has_modifier, layer->modifier,
+                    /* zpos */ false, 0, 0,
+                    /* rotation */ false, PLANE_TRANSFORM_NONE,
+                    /* id_range */ true, builder->layers[index - 1].plane_id + 1
+                    // clang-format on
+                );
+            }
+        }
     }
 
     if (plane == NULL) {
-        LOG_ERROR("Could not find a suitable unused DRM plane for pushing the framebuffer.\n");
+        LOG_DEBUG("Could not find a suitable unused DRM plane for pushing the framebuffer.\n");
         return EIO;
     }
 
@@ -2562,13 +2657,29 @@ int kms_req_builder_push_fb_layer(
             drmModeAtomicAddProperty(builder->req, plane_id, plane->ids.zpos, zpos);
         }
 
-        if (layer->has_rotation && plane->has_rotation && !plane->has_hardcoded_rotation) {
-            drmModeAtomicAddProperty(builder->req, plane_id, plane->ids.rotation, layer->rotation.u64);
+        if (layer->has_rotation) {
+            // Check if the plane can apply the requested rotation:
+            // 1. Plane must have a rotation property
+            // 2. If hardcoded, it must match the requested rotation
+            // 3. The requested rotation bits must be supported by the plane
+            bool can_apply_rotation = plane->has_rotation &&
+                (!plane->has_hardcoded_rotation || plane->hardcoded_rotation.u32 == layer->rotation.u32) &&
+                !(layer->rotation.u32 & ~plane->supported_rotations.u32);
+
+            if (can_apply_rotation && !plane->has_hardcoded_rotation) {
+                drmModeAtomicAddProperty(builder->req, plane_id, plane->ids.rotation, layer->rotation.u64);
+            } else if (!can_apply_rotation && layer->enforce_rotation) {
+                // Rotation was requested and must be enforced, but plane can't apply it
+                LOG_ERROR("Rotation requested with enforce_rotation=true, but plane %" PRIu32 " cannot apply it.\n", plane_id);
+                ok = EINVAL;
+                goto fail_release_plane;
+            }
+            // else: rotation requested but not enforced, or hardcoded rotation matches - silently skip setting property
         }
 
         if (index == 0) {
             if (plane->has_alpha) {
-                drmModeAtomicAddProperty(builder->req, plane_id, plane->ids.alpha, DRM_BLEND_ALPHA_OPAQUE);
+                drmModeAtomicAddProperty(builder->req, plane_id, plane->ids.alpha, plane->max_alpha);
             }
 
             if (plane->has_blend_mode && plane->supported_blend_modes[kNone_DrmBlendMode]) {
