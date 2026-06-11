@@ -379,6 +379,43 @@ if (BUILD_CHARSET_CONVERTER_PLUGIN)
   target_sources(flutterpi_module PRIVATE src/plugins/charset_converter.c)
 endif()
 
+# GStreamer WebRTC plugin (Homey Portal) — exposes `portal/gstreamerWebrtc`
+# method channel + flutter-pi external texture for the live camera stream.
+# Reuses src/plugins/gstreamer_video_player/frame.c for the EGLImage DMA-BUF
+# import (NV12 from mppvideodec → GL texture, zero-copy).
+pkg_check_modules(WEBRTC_LIBGSTREAMER            REQUIRED IMPORTED_TARGET gstreamer-1.0)
+pkg_check_modules(WEBRTC_LIBGSTREAMER_WEBRTC     REQUIRED IMPORTED_TARGET gstreamer-webrtc-1.0)
+pkg_check_modules(WEBRTC_LIBGSTREAMER_SDP        REQUIRED IMPORTED_TARGET gstreamer-sdp-1.0)
+pkg_check_modules(WEBRTC_LIBGSTREAMER_VIDEO      REQUIRED IMPORTED_TARGET gstreamer-video-1.0)
+pkg_check_modules(WEBRTC_LIBGSTREAMER_APP        REQUIRED IMPORTED_TARGET gstreamer-app-1.0)
+pkg_check_modules(WEBRTC_LIBGSTREAMER_ALLOCATORS REQUIRED IMPORTED_TARGET gstreamer-allocators-1.0)
+
+# frame.c uses LIBGSTREAMER_VERSION_{MAJOR,MINOR,PATCH} as preprocessor macros
+# for version-conditional code (e.g. >= 1.16, >= 1.21.3). Expose them.
+string(REPLACE "." ";" WEBRTC_LIBGSTREAMER_VER_LIST ${WEBRTC_LIBGSTREAMER_VERSION})
+list(GET WEBRTC_LIBGSTREAMER_VER_LIST 0 WEBRTC_LIBGSTREAMER_VER_MAJOR)
+list(GET WEBRTC_LIBGSTREAMER_VER_LIST 1 WEBRTC_LIBGSTREAMER_VER_MINOR)
+list(GET WEBRTC_LIBGSTREAMER_VER_LIST 2 WEBRTC_LIBGSTREAMER_VER_PATCH)
+target_compile_definitions(flutterpi_module PRIVATE
+  LIBGSTREAMER_VERSION_MAJOR=${WEBRTC_LIBGSTREAMER_VER_MAJOR}
+  LIBGSTREAMER_VERSION_MINOR=${WEBRTC_LIBGSTREAMER_VER_MINOR}
+  LIBGSTREAMER_VERSION_PATCH=${WEBRTC_LIBGSTREAMER_VER_PATCH}
+)
+
+target_sources(flutterpi_module PRIVATE
+  src/plugins/gstreamer_webrtc/plugin.c
+  src/plugins/gstreamer_webrtc/session.c
+  src/plugins/gstreamer_video_player/frame.c
+)
+target_link_libraries(flutterpi_module PUBLIC
+  PkgConfig::WEBRTC_LIBGSTREAMER
+  PkgConfig::WEBRTC_LIBGSTREAMER_WEBRTC
+  PkgConfig::WEBRTC_LIBGSTREAMER_SDP
+  PkgConfig::WEBRTC_LIBGSTREAMER_VIDEO
+  PkgConfig::WEBRTC_LIBGSTREAMER_APP
+  PkgConfig::WEBRTC_LIBGSTREAMER_ALLOCATORS
+)
+
 # Sentry Plugin
 set(HAVE_BUNDLED_CRASHPAD_HANDLER OFF)
 if (BUILD_SENTRY_PLUGIN)
