@@ -496,6 +496,13 @@ static void on_pad_added(GstElement *webrtcbin, GstPad *new_pad, gpointer data) 
         decode = gst_element_factory_make("mppvideodec", NULL);
         if (decode) g_object_set(decode, "arm-afbc", FALSE, NULL);
         else        decode = gst_element_factory_make("avdec_h264", NULL);
+    } else if (payload_type == 104) {
+        // Generic H265 by payload number (matches our codec preference).
+        depay = gst_element_factory_make("rtph265depay", NULL);
+        parse = gst_element_factory_make("h265parse", NULL); uses_parse = TRUE;
+        decode = gst_element_factory_make("mppvideodec", NULL);
+        if (decode) g_object_set(decode, "arm-afbc", FALSE, NULL);
+        else        decode = gst_element_factory_make("avdec_h265", NULL);
     } else {
         LOG("[%" G_GINT64_FORMAT "] pad-added: no codec match (encoding=%s payload=%d), trying VP8 fallback",
             s->id, encoding_name ? encoding_name : "(none)", payload_type);
@@ -660,13 +667,21 @@ static gboolean do_session_setup(gpointer data) {
     if (audio_trans) gst_object_unref(audio_trans);
     gst_caps_unref(audio_caps);
 
-    // Video transceiver + codec preferences (VP8/VP9/H264)
+    // Video transceiver + codec preferences (VP8/VP9/H264/H265)
+    //
+    // H265 is last: it only wins when the sender has nothing else, which is
+    // exactly the H265-only camera case (go2rtc cannot transcode, so an
+    // H265 source otherwise fails negotiation with "codecs not matched").
+    // No a=fmtp is emitted for it — go2rtc matches H265 on name + clock-rate
+    // only, and an unmatched profile/level would turn a working stream into
+    // a rejected one.
     GstCaps *video_caps = gst_caps_from_string(
         "application/x-rtp,media=video,encoding-name=H264,payload=103,clock-rate=90000");
     GstCaps *video_pref_caps = gst_caps_from_string(
         "application/x-rtp,media=video,encoding-name=VP8,payload=96,clock-rate=90000;"
         "application/x-rtp,media=video,encoding-name=VP9,payload=98,clock-rate=90000;"
-        "application/x-rtp,media=video,encoding-name=H264,payload=103,clock-rate=90000");
+        "application/x-rtp,media=video,encoding-name=H264,payload=103,clock-rate=90000;"
+        "application/x-rtp,media=video,encoding-name=H265,payload=104,clock-rate=90000");
     GstWebRTCRTPTransceiver *video_trans = NULL;
     g_signal_emit_by_name(s->webrtcbin, "add-transceiver",
         GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_RECVONLY, video_caps, &video_trans);
@@ -756,6 +771,7 @@ int webrtc_session_set_answer(struct webrtc_session *s, const char *answer_sdp) 
     const char *vp8 = strstr(answer_sdp, "a=rtpmap:96 VP8/90000");
     const char *vp9 = strstr(answer_sdp, "a=rtpmap:98 VP9/90000");
     const char *h264 = strstr(answer_sdp, "H264/90000");
+    const char *h265 = strstr(answer_sdp, "H265/90000");
 
     // Some Nest responses leave m=video active (port 9) but list only payload
     // 0 with no usable video rtpmap. Treat as video rejected.
@@ -765,7 +781,7 @@ int webrtc_session_set_answer(struct webrtc_session *s, const char *answer_sdp) 
     gboolean video_only_pt0 = (strstr(video_line, " UDP/TLS/RTP/SAVPF 0") != NULL);
     g_free(video_line);
 
-    if (video_only_pt0 || (!vp8 && !vp9 && !h264)) {
+    if (video_only_pt0 || (!vp8 && !vp9 && !h264 && !h265)) {
         LOG("[%" G_GINT64_FORMAT "] set_answer: answer has no usable video codec (pt0_only=%d)",
             s->id, video_only_pt0 ? 1 : 0);
         return -1;

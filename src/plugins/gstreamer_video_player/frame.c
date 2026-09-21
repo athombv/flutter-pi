@@ -478,7 +478,20 @@ static bool get_plane_sizes_from_meta(const GstVideoMeta *meta, size_t plane_siz
 
     gst_ok = gst_video_meta_get_plane_size(meta_non_const, plane_sizes_out);
     if (gst_ok != TRUE) {
-        LOG_ERROR("Could not query video frame plane size. gst_video_meta_get_plane_size\n");
+        // Not fatal: get_plane_infos() falls back to gst_video_info_align_full()
+        // and then to calculating the sizes itself. mppvideodec hands us buffers
+        // whose meta trips this on every single frame, so log it once rather than
+        // once per frame.
+        //
+        // This runs on GStreamer streaming threads and several sessions can be
+        // decoding at once, so the once-guard has to be race-free -- a plain
+        // static bool would be a data race. Same idiom as ensure_glib_running()
+        // in plugins/gstreamer_webrtc/session.c.
+        static gsize logged = 0;
+        if (g_once_init_enter(&logged)) {
+            LOG_ERROR("Could not query video frame plane size. gst_video_meta_get_plane_size (falling back; logged once)\n");
+            g_once_init_leave(&logged, 1);
+        }
         return false;
     }
 
@@ -500,7 +513,14 @@ static bool get_plane_sizes_from_video_info(const GstVideoInfo *info, size_t pla
 
     gst_ok = gst_video_info_align_full(info_non_const, &alignment, plane_sizes_out);
     if (gst_ok != TRUE) {
-        LOG_ERROR("Could not query video frame plane size. gst_video_info_align_full\n");
+        // Same as above: calculate_plane_size() is still to come, so this is a
+        // fallback step and not a per-frame error worth repeating. Race-free
+        // once-guard for the same reason.
+        static gsize logged = 0;
+        if (g_once_init_enter(&logged)) {
+            LOG_ERROR("Could not query video frame plane size. gst_video_info_align_full (falling back; logged once)\n");
+            g_once_init_leave(&logged, 1);
+        }
         return false;
     }
 
