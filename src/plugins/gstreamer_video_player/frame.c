@@ -478,7 +478,15 @@ static bool get_plane_sizes_from_meta(const GstVideoMeta *meta, size_t plane_siz
 
     gst_ok = gst_video_meta_get_plane_size(meta_non_const, plane_sizes_out);
     if (gst_ok != TRUE) {
-        LOG_ERROR("Could not query video frame plane size. gst_video_meta_get_plane_size\n");
+        // Not fatal: get_plane_infos() falls back to gst_video_info_align_full()
+        // and then to calculating the sizes itself. mppvideodec hands us buffers
+        // whose meta trips this on every single frame, so log it once rather than
+        // once per frame.
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            LOG_ERROR("Could not query video frame plane size. gst_video_meta_get_plane_size (falling back; logged once)\n");
+        }
         return false;
     }
 
@@ -500,7 +508,13 @@ static bool get_plane_sizes_from_video_info(const GstVideoInfo *info, size_t pla
 
     gst_ok = gst_video_info_align_full(info_non_const, &alignment, plane_sizes_out);
     if (gst_ok != TRUE) {
-        LOG_ERROR("Could not query video frame plane size. gst_video_info_align_full\n");
+        // Same as above: calculate_plane_size() is still to come, so this is a
+        // fallback step and not a per-frame error worth repeating.
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            LOG_ERROR("Could not query video frame plane size. gst_video_info_align_full (falling back; logged once)\n");
+        }
         return false;
     }
 
