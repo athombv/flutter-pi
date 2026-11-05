@@ -363,6 +363,9 @@ static int on_create_session(struct platch_obj *object, FlutterPlatformMessageRe
 }
 
 static int on_await_offer(struct platch_obj *object, FlutterPlatformMessageResponseHandle *responsehandle) {
+    if (!STDVALUE_IS_MAP(object->std_arg)) {
+        return platch_respond_illegal_arg_std(responsehandle, "Expected arguments to be a map.");
+    }
     struct std_value *id_v = stdmap_get_str(&object->std_arg, "sessionId");
     if (id_v == NULL || !STDVALUE_IS_INT(*id_v)) {
         return platch_respond_illegal_arg_std(responsehandle, "Expected `arg['sessionId']` to be an integer.");
