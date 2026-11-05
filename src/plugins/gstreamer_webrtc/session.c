@@ -810,6 +810,23 @@ static gboolean do_session_destroy(gpointer data) {
     struct webrtc_session *s = ctx->s;
     LOG("[%" G_GINT64_FORMAT "] destroy", s->id);
 
+    if (s->pipeline) {
+        // webrtcbin keeps emitting during teardown (e.g. connection-state →
+        // connected when DTLS finishes mid-NULL), and on_connection_state_change
+        // would re-arm the PLI timer on a session that is about to be freed.
+        if (s->webrtcbin) g_signal_handlers_disconnect_by_data(s->webrtcbin, s);
+        GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(s->pipeline));
+        gst_bus_remove_watch(bus);
+        gst_object_unref(bus);
+
+        // NULL joins webrtcbin's thread and stops the streaming threads, so no
+        // handler, pad probe or appsink callback can touch `s` after this.
+        gst_element_set_state(s->pipeline, GST_STATE_NULL);
+        gst_object_unref(s->pipeline);
+    }
+
+    // Only after NULL: a handler already running during teardown (or the
+    // offer promise) may have armed a timer after we would have removed it.
     if (s->pli_timer_source != 0) {
         g_source_remove(s->pli_timer_source);
         s->pli_timer_source = 0;
@@ -817,10 +834,6 @@ static gboolean do_session_destroy(gpointer data) {
     if (s->ice_timeout_source != 0) {
         g_source_remove(s->ice_timeout_source);
         s->ice_timeout_source = 0;
-    }
-    if (s->pipeline) {
-        gst_element_set_state(s->pipeline, GST_STATE_NULL);
-        gst_object_unref(s->pipeline);
     }
     g_free(s);
     g_free(ctx);

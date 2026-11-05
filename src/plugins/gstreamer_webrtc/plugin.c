@@ -7,9 +7,11 @@
  * NV12 dmabuf samples onto a flutter-pi external texture (zero-copy EGLImage
  * via gstreamer_video_player/frame.c).
  *
- * createSession defers its method-channel reply until the real SDP offer is
- * ready (no polling). A videoSize event reports the source dimensions and a
- * firstFrame event fires once a frame is queued on the texture.
+ * createSession replies at once with the session and texture ids, so Dart can
+ * dispose a session that is still gathering ICE candidates. awaitOffer defers
+ * its reply until the real SDP offer is ready (no polling). A videoSize event
+ * reports the source dimensions and a firstFrame event fires once a frame is
+ * queued on the texture.
  */
 
 #define _GNU_SOURCE
@@ -17,6 +19,7 @@
 #include <inttypes.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 // gstreamer_video_player.h uses GstSample / GstVideoFormat without including
@@ -44,8 +47,11 @@ struct session_slot {
     struct texture *texture;
     int64_t texture_id;
     struct webrtc_session *gst_session;
-    // The deferred createSession reply. NULL once we've responded.
-    FlutterPlatformMessageResponseHandle *pending_create_handle;
+    // The deferred awaitOffer reply. NULL until Dart asks, and again once we've responded.
+    FlutterPlatformMessageResponseHandle *pending_offer_handle;
+    // The offer, or the setup error, kept for an awaitOffer that arrives after it.
+    char *offer_sdp;
+    char *offer_error;
     // Last source dimensions sent to Dart (so we only send `videoSize` when it
     // actually changes — usually just the first frame).
     int last_width;
@@ -117,7 +123,11 @@ static struct webrtc_session *session_release_locked(struct session_slot *s) {
         s->texture = NULL;
     }
     s->gst_session = NULL;
-    s->pending_create_handle = NULL;
+    s->pending_offer_handle = NULL;
+    free(s->offer_sdp);
+    s->offer_sdp = NULL;
+    free(s->offer_error);
+    s->offer_error = NULL;
     s->in_use = false;
     s->session_id = 0;
     s->texture_id = 0;
@@ -129,34 +139,33 @@ static struct webrtc_session *session_release_locked(struct session_slot *s) {
 
 // ─── Session callbacks (invoked on the GLib main loop thread) ────────────────
 
+static int respond_offer(FlutterPlatformMessageResponseHandle *handle, const char *sdp) {
+    struct std_value result = STDMAP1(STDSTRING("offerSdp"), STDSTRING((char *) sdp));
+    return platch_respond_success_std(handle, &result);
+}
+
 static void on_session_offer_ready(struct webrtc_session *session, const char *sdp, void *userdata) {
     (void) session;
     int64_t id = (int64_t)(intptr_t) userdata;
 
     pthread_mutex_lock(&plugin.mutex);
     struct session_slot *s = session_get_locked(id);
-    if (s == NULL || s->pending_create_handle == NULL) {
-        // Disposed before the offer arrived, or already responded — drop it.
+    if (s == NULL) {
+        // Disposed before the offer arrived — drop it.
         pthread_mutex_unlock(&plugin.mutex);
         return;
     }
-    FlutterPlatformMessageResponseHandle *handle = s->pending_create_handle;
-    s->pending_create_handle = NULL;
-    int64_t session_id = s->session_id;
-    int64_t texture_id = s->texture_id;
+    s->offer_sdp = strdup(sdp);
+    FlutterPlatformMessageResponseHandle *handle = s->pending_offer_handle;
+    s->pending_offer_handle = NULL;
     pthread_mutex_unlock(&plugin.mutex);
 
-    LOG("createSession[%" PRId64 "]: offer ready (%zu bytes), responding to Dart", session_id, strlen(sdp));
-
-    struct std_value result = STDMAP3(
-        STDSTRING("sessionId"),
-        STDINT64(session_id),
-        STDSTRING("textureId"),
-        STDINT64(texture_id),
-        STDSTRING("offerSdp"),
-        STDSTRING((char *) sdp)
-    );
-    platch_respond_success_std(handle, &result);
+    if (handle == NULL) {
+        LOG("awaitOffer[%" PRId64 "]: offer ready (%zu bytes), held until Dart asks", id, strlen(sdp));
+        return;
+    }
+    LOG("awaitOffer[%" PRId64 "]: offer ready (%zu bytes), responding to Dart", id, strlen(sdp));
+    respond_offer(handle, sdp);
 }
 
 // texture_push_frame's destroy callback — releases the EGLImage/dmabuf-fd-backed
@@ -268,16 +277,19 @@ static void on_session_error(struct webrtc_session *session, const char *message
 
     pthread_mutex_lock(&plugin.mutex);
     struct session_slot *s = session_get_locked(id);
-    if (s == NULL || s->pending_create_handle == NULL) {
+    if (s == NULL || s->offer_sdp != NULL || s->offer_error != NULL) {
         pthread_mutex_unlock(&plugin.mutex);
         return;
     }
-    FlutterPlatformMessageResponseHandle *handle = s->pending_create_handle;
-    s->pending_create_handle = NULL;
+    s->offer_error = strdup(message);
+    FlutterPlatformMessageResponseHandle *handle = s->pending_offer_handle;
+    s->pending_offer_handle = NULL;
     pthread_mutex_unlock(&plugin.mutex);
 
-    LOG("createSession[%" PRId64 "]: session error: %s", id, message);
-    platch_respond_error_std(handle, "session-error", (char *) message, NULL);
+    LOG("awaitOffer[%" PRId64 "]: session error: %s", id, message);
+    if (handle != NULL) {
+        platch_respond_error_std(handle, "session-error", (char *) message, NULL);
+    }
 }
 
 // ─── Method handlers ─────────────────────────────────────────────────────────
@@ -315,13 +327,12 @@ static int on_create_session(struct platch_obj *object, FlutterPlatformMessageRe
     slot->session_id = plugin.next_session_id++;
     slot->texture = texture;
     slot->texture_id = texture_get_id(texture);
-    slot->pending_create_handle = responsehandle;
 
     int64_t session_id = slot->session_id;
     int64_t texture_id = slot->texture_id;
 
     // Kick off the WebRTC pipeline. The offer SDP comes back via the callback
-    // on the GLib thread; this thread does not block.
+    // on the GLib thread and is handed to awaitOffer; this thread does not block.
     struct webrtc_session *gst = webrtc_session_new(
         enable_data_channel,
         on_session_offer_ready,
@@ -331,7 +342,6 @@ static int on_create_session(struct platch_obj *object, FlutterPlatformMessageRe
         (void *)(intptr_t) session_id
     );
     if (gst == NULL) {
-        slot->pending_create_handle = NULL;
         session_release_locked(slot);
         pthread_mutex_unlock(&plugin.mutex);
         return platch_respond_error_std(responsehandle, "session-failed", "webrtc_session_new() failed", NULL);
@@ -340,11 +350,53 @@ static int on_create_session(struct platch_obj *object, FlutterPlatformMessageRe
 
     pthread_mutex_unlock(&plugin.mutex);
 
-    LOG("createSession[%" PRId64 "]: texture=%" PRId64 " dataChannel=%s — awaiting offer",
+    LOG("createSession[%" PRId64 "]: texture=%" PRId64 " dataChannel=%s — offer pending",
         session_id, texture_id, enable_data_channel ? "true" : "false");
 
-    // No platch response here — we'll reply from on_session_offer_ready.
-    return 0;
+    struct std_value result = STDMAP2(
+        STDSTRING("sessionId"),
+        STDINT64(session_id),
+        STDSTRING("textureId"),
+        STDINT64(texture_id)
+    );
+    return platch_respond_success_std(responsehandle, &result);
+}
+
+static int on_await_offer(struct platch_obj *object, FlutterPlatformMessageResponseHandle *responsehandle) {
+    struct std_value *id_v = stdmap_get_str(&object->std_arg, "sessionId");
+    if (id_v == NULL || !STDVALUE_IS_INT(*id_v)) {
+        return platch_respond_illegal_arg_std(responsehandle, "Expected `arg['sessionId']` to be an integer.");
+    }
+    int64_t id = STDVALUE_AS_INT(*id_v);
+
+    pthread_mutex_lock(&plugin.mutex);
+    struct session_slot *slot = session_get_locked(id);
+    if (slot == NULL) {
+        pthread_mutex_unlock(&plugin.mutex);
+        return platch_respond_error_std(responsehandle, "no-session", "unknown sessionId", NULL);
+    }
+    if (slot->pending_offer_handle != NULL) {
+        pthread_mutex_unlock(&plugin.mutex);
+        return platch_respond_error_std(responsehandle, "already-awaiting", "awaitOffer already pending", NULL);
+    }
+    char *sdp = slot->offer_sdp != NULL ? strdup(slot->offer_sdp) : NULL;
+    char *error = slot->offer_error != NULL ? strdup(slot->offer_error) : NULL;
+    if (sdp == NULL && error == NULL) {
+        // Still gathering — on_session_offer_ready (or on_session_error) replies.
+        slot->pending_offer_handle = responsehandle;
+    }
+    pthread_mutex_unlock(&plugin.mutex);
+
+    int ok = 0;
+    if (sdp != NULL) {
+        LOG("awaitOffer[%" PRId64 "]: offer already ready (%zu bytes), responding to Dart", id, strlen(sdp));
+        ok = respond_offer(responsehandle, sdp);
+    } else if (error != NULL) {
+        ok = platch_respond_error_std(responsehandle, "session-error", error, NULL);
+    }
+    free(sdp);
+    free(error);
+    return ok;
 }
 
 static int on_set_answer(struct platch_obj *object, FlutterPlatformMessageResponseHandle *responsehandle) {
@@ -388,14 +440,14 @@ static int on_dispose_session(struct platch_obj *object, FlutterPlatformMessageR
     struct webrtc_session *gst = NULL;
     FlutterPlatformMessageResponseHandle *pending = NULL;
     if (slot != NULL) {
-        pending = slot->pending_create_handle;
-        slot->pending_create_handle = NULL;
+        pending = slot->pending_offer_handle;
+        slot->pending_offer_handle = NULL;
         gst = session_release_locked(slot);
         LOG("disposeSession[%" PRId64 "]: slot released", id);
     }
     pthread_mutex_unlock(&plugin.mutex);
 
-    // If createSession hadn't replied yet, fail it cleanly before the pipeline
+    // If awaitOffer hadn't replied yet, fail it cleanly before the pipeline
     // teardown so Dart isn't left awaiting forever.
     if (pending != NULL) {
         platch_respond_error_std(pending, "session-disposed", "session disposed before offer ready", NULL);
@@ -412,6 +464,8 @@ static int on_method_call(char *channel, struct platch_obj *object, FlutterPlatf
 
     if (strcmp(method, "createSession") == 0) {
         return on_create_session(object, responsehandle);
+    } else if (strcmp(method, "awaitOffer") == 0) {
+        return on_await_offer(object, responsehandle);
     } else if (strcmp(method, "setAnswer") == 0) {
         return on_set_answer(object, responsehandle);
     } else if (strcmp(method, "disposeSession") == 0) {
