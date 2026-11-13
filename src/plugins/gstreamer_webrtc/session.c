@@ -39,7 +39,9 @@ struct webrtc_session {
     GstElement *pipeline;
     GstElement *webrtcbin;
 
-    gboolean    offer_signalled;   // guarded by s_glib_loop (we only touch on GLib thread)
+    // Atomic: signal_offer() runs on webrtcbin's thread (on-ice-candidate,
+    // notify::ice-gathering-state) and on ours (ice_gathering_timeout).
+    gint        offer_signalled;
     guint       ice_timeout_source;
     guint       pli_timer_source;
 
@@ -221,12 +223,14 @@ static gchar *patch_video_sdp(const gchar *sdp) {
 // ─── Offer signalling ─────────────────────────────────────────────────────────
 
 static void signal_offer(struct webrtc_session *s) {
-    if (s->offer_signalled) return;
+    if (!g_atomic_int_compare_and_exchange(&s->offer_signalled, FALSE, TRUE)) return;
 
     GstWebRTCSessionDescription *local_desc = NULL;
     g_object_get(s->webrtcbin, "local-description", &local_desc, NULL);
     if (!local_desc) {
         LOG("[%" G_GINT64_FORMAT "] signal_offer: failed to get local-description", s->id);
+        // Let a later trigger (gathering complete / timeout) retry.
+        g_atomic_int_set(&s->offer_signalled, FALSE);
         return;
     }
     gchar *raw_sdp = gst_sdp_message_as_text(local_desc->sdp);
@@ -235,7 +239,6 @@ static void signal_offer(struct webrtc_session *s) {
     gchar *sdp_str = patch_video_sdp(raw_sdp);
     g_free(raw_sdp);
 
-    s->offer_signalled = TRUE;
     LOG("[%" G_GINT64_FORMAT "] signal_offer: offer ready (%zu bytes)", s->id, strlen(sdp_str));
 
     if (s->offer_ready_cb) {
@@ -256,13 +259,29 @@ static gboolean ice_gathering_timeout(gpointer data) {
 static void on_offer_created(GstPromise *promise, gpointer data) {
     struct webrtc_session *s = data;
 
+    // Runs on webrtcbin's pc thread, which set_state(NULL) joins (READY→NULL,
+    // _stop_thread), so `s` is still valid here. If the task runs after
+    // webrtcbin is closed, the reply carries "error" instead of "offer"; if it
+    // never runs, this callback isn't invoked at all. The REPLIED check is
+    // defensive against other GStreamer versions.
+    if (gst_promise_wait(promise) != GST_PROMISE_RESULT_REPLIED) {
+        LOG("[%" G_GINT64_FORMAT "] on_offer_created: promise not replied", s->id);
+        gst_promise_unref(promise);
+        return;
+    }
     const GstStructure *reply = gst_promise_get_reply(promise);
     GstWebRTCSessionDescription *offer = NULL;
-    gst_structure_get(reply, "offer", GST_TYPE_WEBRTC_SESSION_DESCRIPTION, &offer, NULL);
+    GError *error = NULL;
+    if (reply != NULL) {
+        gst_structure_get(reply, "offer", GST_TYPE_WEBRTC_SESSION_DESCRIPTION, &offer, NULL);
+        if (offer == NULL) gst_structure_get(reply, "error", G_TYPE_ERROR, &error, NULL);
+    }
     gst_promise_unref(promise);
 
     if (!offer) {
-        LOG("[%" G_GINT64_FORMAT "] on_offer_created: no offer in reply", s->id);
+        LOG("[%" G_GINT64_FORMAT "] on_offer_created: no offer in reply (%s)", s->id,
+            error != NULL ? error->message : "no error");
+        g_clear_error(&error);
         return;
     }
 
@@ -810,6 +829,23 @@ static gboolean do_session_destroy(gpointer data) {
     struct webrtc_session *s = ctx->s;
     LOG("[%" G_GINT64_FORMAT "] destroy", s->id);
 
+    if (s->pipeline) {
+        // webrtcbin keeps emitting during teardown (e.g. connection-state →
+        // connected when DTLS finishes mid-NULL), and on_connection_state_change
+        // would re-arm the PLI timer on a session that is about to be freed.
+        if (s->webrtcbin) g_signal_handlers_disconnect_by_data(s->webrtcbin, s);
+        GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(s->pipeline));
+        gst_bus_remove_watch(bus);
+        gst_object_unref(bus);
+
+        // NULL joins webrtcbin's thread and stops the streaming threads, so no
+        // handler, pad probe or appsink callback can touch `s` after this.
+        gst_element_set_state(s->pipeline, GST_STATE_NULL);
+        gst_object_unref(s->pipeline);
+    }
+
+    // Only after NULL: a handler already running during teardown (or the
+    // offer promise) may have armed a timer after we would have removed it.
     if (s->pli_timer_source != 0) {
         g_source_remove(s->pli_timer_source);
         s->pli_timer_source = 0;
@@ -817,10 +853,6 @@ static gboolean do_session_destroy(gpointer data) {
     if (s->ice_timeout_source != 0) {
         g_source_remove(s->ice_timeout_source);
         s->ice_timeout_source = 0;
-    }
-    if (s->pipeline) {
-        gst_element_set_state(s->pipeline, GST_STATE_NULL);
-        gst_object_unref(s->pipeline);
     }
     g_free(s);
     g_free(ctx);
